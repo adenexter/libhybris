@@ -88,12 +88,14 @@ static pthread_mutex_t _mutex = PTHREAD_MUTEX_INITIALIZER;
 HWComposerNativeWindowBuffer::HWComposerNativeWindowBuffer(unsigned int width,
                             unsigned int height,
                             unsigned int format,
-                            unsigned int usage)
+                            unsigned int usage,
+                            unsigned int sequence)
 {
     ANativeWindowBuffer::width  = width;
     ANativeWindowBuffer::height = height;
     ANativeWindowBuffer::format = format;
     ANativeWindowBuffer::usage  = usage;
+    sequenceId = sequence;
     fenceFd = -1;
     busy = 0;
     status = 0;
@@ -117,12 +119,16 @@ HWComposerNativeWindowBuffer::~HWComposerNativeWindowBuffer()
 HWComposerNativeWindow::HWComposerNativeWindow(unsigned int width, unsigned int height, unsigned int format)
 {
     pthread_mutex_init(&m_mutex, 0);
+    pthread_cond_init(&m_cond, 0);
+
     m_width = width;
     m_height = height;
     m_bufFormat = format;
     m_usage = GRALLOC_USAGE_HW_COMPOSER|GRALLOC_USAGE_HW_FB;
     m_bufferCount = 2;
-    m_nextBuffer = 0;
+    m_lastBuffer = 0;
+    m_dequeuedCount = 0;
+    m_sequenceId = 0;
 }
 
 HWComposerNativeWindow::~HWComposerNativeWindow()
@@ -136,14 +142,15 @@ void HWComposerNativeWindow::destroyBuffers()
 {
     TRACE("");
 
-    std::vector<HWComposerNativeWindowBuffer*>::iterator it = m_bufList.begin();
-    for (; it!=m_bufList.end(); ++it)
-    {
-        HWComposerNativeWindowBuffer* fbnb = *it;
+    for (size_t i = 0; i < m_bufList.size(); ++i) {
+        HWComposerNativeWindowBuffer* fbnb = m_bufList[(m_lastBuffer + i) % m_bufferCount];
         fbnb->common.decRef(&fbnb->common);
     }
+
     m_bufList.clear();
-    m_nextBuffer = 0;
+    m_lastBuffer = 0;
+    m_dequeuedCount = 0;
+    ++m_sequenceId;
 }
 
 
@@ -190,26 +197,44 @@ int HWComposerNativeWindow::dequeueBuffer(BaseNativeWindowBuffer** buffer, int *
     if (m_bufList.empty())
         allocateBuffers();
     assert(!m_bufList.empty());
-    assert(m_nextBuffer < m_bufList.size());
 
+    const unsigned int sequenceId = m_sequenceId;
+
+    while (m_dequeuedCount == m_bufferCount) {
+        fprintf(stderr, "dequeue blocked %d %d %d\n", m_lastBuffer, m_dequeuedCount, m_bufferCount);
+        *buffer = 0;
+        *fenceFd = 0;
+
+        if (m_bufferCount == 0) {
+            pthread_mutex_unlock(&m_mutex);
+            return -1;
+        } else if (sequenceId != m_sequenceId) {
+            pthread_mutex_unlock(&m_mutex);
+            return -1;
+        }
+
+        pthread_cond_wait(&m_cond, &m_mutex);
+    }
 
     // Grabe the next available buffer in the list and assign m_nextBuffer to
     // the next one.
-    HWComposerNativeWindowBuffer *b = m_bufList.at(m_nextBuffer);
-    TRACE("idx=%d, buffer=%p, fence=%d", m_nextBuffer, b, b->fenceFd);
+    const unsigned int nextBuffer = (m_lastBuffer + m_dequeuedCount) % m_bufferCount;
+
+    HWComposerNativeWindowBuffer *b = m_bufList.at(nextBuffer);
+    TRACE("idx=%d, buffer=%p, fence=%d", nextBuffer, b, b->fenceFd);
     *buffer = b;
-    m_nextBuffer++;
-    if (m_nextBuffer >= m_bufList.size())
-        m_nextBuffer = 0;
+
+    ++m_dequeuedCount;
+
+//    fprintf(stderr, "Dequeued buffer %p %d %d %d\n", b, m_lastBuffer, m_dequeuedCount, m_bufferCount);
 
     // assign the buffer's fence to fenceFd and close/reset our fd.
-    int fence = b->fenceFd;
-    if (fenceFd)
-        *fenceFd = dup(fence);
-    if (fence != -1) {
+    if (fenceFd) {
+        *fenceFd = b->fenceFd;
+    } else if (b->fenceFd!= -1) {
         close(b->fenceFd);
-        b->fenceFd = -1;
     }
+    b->fenceFd = -1;
 
     pthread_mutex_unlock(&m_mutex);
     HYBRIS_TRACE_END("hwcomposer-platform", "dequeueBuffer", "");
@@ -242,9 +267,27 @@ int HWComposerNativeWindow::queueBuffer(BaseNativeWindowBuffer* buffer, int fenc
     TRACE("%lu %p %d", pthread_self(), buffer, fenceFd);
 
     pthread_mutex_lock(&m_mutex);
-    assert(b->fenceFd == -1); // We reset it in dequeue, so it better be -1 still..
-    b->fenceFd = fenceFd;
-    this->present(b);
+
+    if (m_sequenceId != b->sequenceId) {
+        // The buffer was orphaned
+        if (fenceFd != -1) {
+            close(fenceFd);
+        }
+        b->common.decRef(&b->common);
+    } else {
+        assert(b->fenceFd == -1); // We reset it in dequeue, so it better be -1 still..
+        b->fenceFd = fenceFd;
+
+        m_bufList[m_lastBuffer] = b;
+        m_lastBuffer = (m_lastBuffer + 1) % m_bufferCount;
+        --m_dequeuedCount;
+
+//        fprintf(stderr, "Queued buffer %p %p %d %d %d\n", buffer, m_bufList[m_lastBuffer], m_lastBuffer, m_dequeuedCount, m_bufferCount);
+
+        this->present(b);
+    }
+
+    pthread_cond_signal(&m_cond);
     pthread_mutex_unlock(&m_mutex);
 
     TRACE("%lu %p %d", pthread_self(), b, b->fenceFd);
@@ -295,10 +338,24 @@ int HWComposerNativeWindow::cancelBuffer(BaseNativeWindowBuffer* buffer, int fen
 
     pthread_mutex_lock(&m_mutex);
 
-    // Assign the fence so we can pass it on in dequeue when the buffer is
-    // again acquired.
-    fbnb->fenceFd = fenceFd;
+    if (m_sequenceId != fbnb->sequenceId) {
+        if (fenceFd != -1) {
+            close(fenceFd);
+        }
+        fbnb->common.decRef(&fbnb->common);
+    } else {
+        // Assign the fence so we can pass it on in dequeue when the buffer is
+        // again acquired.
+        fbnb->fenceFd = fenceFd;
 
+        fprintf(stderr, "Canceled buffer %p %p %d %d %d\n", buffer, m_bufList[m_lastBuffer], m_lastBuffer, m_dequeuedCount, m_bufferCount);
+
+        m_bufList[m_lastBuffer] = fbnb;
+        m_lastBuffer = (m_lastBuffer + 1) % m_bufferCount;
+        --m_dequeuedCount;
+    }
+
+    pthread_cond_signal(&m_cond);
     pthread_mutex_unlock(&m_mutex);
     return 0;
 }
@@ -476,7 +533,7 @@ void HWComposerNativeWindow::allocateBuffers()
     for(unsigned int i = 0; i < m_bufferCount; i++)
     {
         HWComposerNativeWindowBuffer *b
-         = new HWComposerNativeWindowBuffer(m_width, m_height, m_bufFormat, m_usage);
+         = new HWComposerNativeWindowBuffer(m_width, m_height, m_bufFormat, m_usage, m_sequenceId);
 
         b->common.incRef(&b->common);
 
@@ -494,7 +551,8 @@ void HWComposerNativeWindow::allocateBuffers()
     }
 
     // Restart the count, to avoid out-of-bounds access if it shrinked.
-    m_nextBuffer = 0;
+    m_lastBuffer = 0;
+    m_dequeuedCount = 0;
 }
 
 /*
