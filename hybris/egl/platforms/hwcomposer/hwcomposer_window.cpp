@@ -216,13 +216,12 @@ int HWComposerNativeWindow::dequeueBuffer(BaseNativeWindowBuffer** buffer, int *
         m_nextBuffer = 0;
 
     // assign the buffer's fence to fenceFd and close/reset our fd.
-    int fence = b->fenceFd;
-    if (fenceFd)
-        *fenceFd = dup(fence);
-    if (fence != -1) {
+    if (fenceFd) {
+        *fenceFd = b->fenceFd;
+    } else if (b->fenceFd != -1) {
         close(b->fenceFd);
-        b->fenceFd = -1;
     }
+    b->fenceFd = -1;
 
     pthread_mutex_unlock(&m_mutex);
     HYBRIS_TRACE_END("hwcomposer-platform", "dequeueBuffer", "");
