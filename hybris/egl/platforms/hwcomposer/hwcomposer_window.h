@@ -32,10 +32,12 @@ protected:
                             unsigned int width,
                             unsigned int height,
                             unsigned int format,
-                            unsigned int usage) ;
+                            unsigned int usage,
+                            unsigned int sequenceId) ;
    virtual ~HWComposerNativeWindowBuffer() ;
 
 protected:
+    unsigned int sequenceId;
     int busy;
     int fenceFd;
     int status;
@@ -88,12 +90,15 @@ private:
     unsigned int m_bufFormat;
     std::vector<HWComposerNativeWindowBuffer*> m_bufList;
     unsigned int m_bufferCount;
-    unsigned int m_nextBuffer;
+    unsigned int m_lastBuffer;
+    unsigned int m_dequeuedCount;
+    unsigned int m_sequenceId;
 
     int m_width;
     int m_height;
 
     pthread_mutex_t m_mutex;
+    pthread_cond_t m_cond;
 };
 
 #endif
