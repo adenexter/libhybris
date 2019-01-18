@@ -206,7 +206,6 @@ WaylandNativeWindow::WaylandNativeWindow(struct wl_egl_window *window, struct wl
     m_freeBufs = 0;
     m_damage_rects = NULL;
     m_damage_n_rects = 0;
-    m_lastBuffer = 0;
     setBufferCount(3);
     HYBRIS_TRACE_END("wayland-platform", "create_window", "");
 }
@@ -385,7 +384,6 @@ int WaylandNativeWindow::dequeueBuffer(BaseNativeWindowBuffer **buffer, int *fen
 
     wnb->busy = 1;
     *buffer = wnb;
-    queue.push_back(wnb);
     --m_freeBufs;
 
     HYBRIS_TRACE_COUNTER("wayland-platform", "m_freeBufs", "%i", m_freeBufs);
@@ -505,17 +503,33 @@ void WaylandNativeWindow::prepareSwap(EGLint *damage_rects, EGLint damage_n_rect
 
 void WaylandNativeWindow::finishSwap()
 {
+}
+
+static int debugenvchecked = 0;
+
+int WaylandNativeWindow::queueBuffer(BaseNativeWindowBuffer* buffer, int fenceFd)
+{
+    WaylandNativeWindowBuffer *wnb = (WaylandNativeWindowBuffer*) buffer;
     int ret = 0;
+
+    HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer", "-%p", wnb);
     lock();
 
-    WaylandNativeWindowBuffer *wnb = queue.front();
-    if (!wnb) {
-        wnb = m_lastBuffer;
-    } else {
-        queue.pop_front();
+    if (debugenvchecked == 0)
+    {
+        if (getenv("HYBRIS_WAYLAND_DUMP_BUFFERS") != NULL)
+            debugenvchecked = 2;
+        else
+            debugenvchecked = 1;
     }
-    assert(wnb);
-    m_lastBuffer = wnb;
+    if (debugenvchecked == 2)
+    {
+        HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer_dumping_buffer", "-%p", wnb);
+        hybris_dump_buffer_to_file(wnb->getNativeBuffer());
+        HYBRIS_TRACE_END("wayland-platform", "queueBuffer_dumping_buffer", "-%p", wnb);
+
+    }
+
     wnb->busy = 1;
 
     ret = readQueue(false);
@@ -526,8 +540,19 @@ void WaylandNativeWindow::finishSwap()
     }
     if (ret < 0) {
         HYBRIS_TRACE_END("wayland-platform", "queueBuffer_wait_for_frame_callback", "-%p", wnb);
-        return;
+        return ret;
     }
+
+#if ANDROID_VERSION_MAJOR>=4 && ANDROID_VERSION_MINOR>=2 || ANDROID_VERSION_MAJOR>=5
+    HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer_waiting_for_fence", "-%p", wnb);
+    if (fenceFd >= 0)
+    {
+        sync_wait(fenceFd, -1);
+        close(fenceFd);
+    }
+    HYBRIS_TRACE_END("wayland-platform", "queueBuffer_waiting_for_fence", "-%p", wnb);
+#endif
+
 
     if (wnb->wlbuffer == NULL)
     {
@@ -559,43 +584,6 @@ void WaylandNativeWindow::finishSwap()
 
     m_damage_rects = NULL;
     m_damage_n_rects = 0;
-    unlock();
-}
-
-static int debugenvchecked = 0;
-
-int WaylandNativeWindow::queueBuffer(BaseNativeWindowBuffer* buffer, int fenceFd)
-{
-    WaylandNativeWindowBuffer *wnb = (WaylandNativeWindowBuffer*) buffer;
-    int ret = 0;
-
-    HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer", "-%p", wnb);
-    lock();
-
-    if (debugenvchecked == 0)
-    {
-        if (getenv("HYBRIS_WAYLAND_DUMP_BUFFERS") != NULL)
-            debugenvchecked = 2;
-        else
-            debugenvchecked = 1;
-    }
-    if (debugenvchecked == 2)
-    {
-        HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer_dumping_buffer", "-%p", wnb);
-        hybris_dump_buffer_to_file(wnb->getNativeBuffer());
-        HYBRIS_TRACE_END("wayland-platform", "queueBuffer_dumping_buffer", "-%p", wnb);
-
-    }
-
-#if ANDROID_VERSION_MAJOR>=4 && ANDROID_VERSION_MINOR>=2 || ANDROID_VERSION_MAJOR>=5
-    HYBRIS_TRACE_BEGIN("wayland-platform", "queueBuffer_waiting_for_fence", "-%p", wnb);
-    if (fenceFd >= 0)
-    {
-        sync_wait(fenceFd, -1);
-        close(fenceFd);
-    }
-    HYBRIS_TRACE_END("wayland-platform", "queueBuffer_waiting_for_fence", "-%p", wnb);
-#endif
 
     HYBRIS_TRACE_COUNTER("wayland-platform", "fronted.size", "%i", fronted.size());
     HYBRIS_TRACE_END("wayland-platform", "queueBuffer", "-%p", wnb);
