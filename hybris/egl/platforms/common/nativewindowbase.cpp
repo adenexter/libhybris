@@ -50,6 +50,7 @@ BaseNativeWindowBuffer::~BaseNativeWindowBuffer()
 	ANativeWindowBuffer::common.decRef = NULL;
 	ANativeWindowBuffer::common.incRef = NULL;
 	refcount = 0;
+        frame_counter = 0;
 }
 
 
@@ -118,6 +119,8 @@ BaseNativeWindow::BaseNativeWindow()
 	ANativeWindow::perform = &_perform;
 
 	refcount = 0;
+        frame_counter = 0;
+        buffer_age = 0;
 }
 
 BaseNativeWindow::~BaseNativeWindow()
@@ -178,8 +181,12 @@ int BaseNativeWindow::_dequeueBuffer_DEPRECATED(ANativeWindow* window, ANativeWi
 
 int BaseNativeWindow::_dequeueBuffer(struct ANativeWindow *window, ANativeWindowBuffer **buffer, int *fenceFd)
 {
+        BaseNativeWindow *nativeWindow = static_cast<BaseNativeWindow*>(window);
 	BaseNativeWindowBuffer *nativeBuffer = static_cast<BaseNativeWindowBuffer*>(*buffer);
-	int ret = static_cast<BaseNativeWindow*>(window)->dequeueBuffer(&nativeBuffer, fenceFd);
+	int ret = nativeWindow->dequeueBuffer(&nativeBuffer, fenceFd);
+        if (nativeBuffer) {
+            nativeWindow->buffer_age = nativeWindow->frame_counter - nativeBuffer->frame_counter;
+        }
 	*buffer = static_cast<ANativeWindowBuffer*>(nativeBuffer);
 	return ret;
 }
@@ -196,6 +203,9 @@ int BaseNativeWindow::_queueBuffer(struct ANativeWindow *window, ANativeWindowBu
 {
 	BaseNativeWindow *nativeWindow = static_cast<BaseNativeWindow*>(window);
 	BaseNativeWindowBuffer *nativeBuffer = static_cast<BaseNativeWindowBuffer*>(buffer);
+
+        nativeBuffer->frame_counter = nativeWindow->frame_counter;
+        ++nativeWindow->frame_counter;
 
 	return nativeWindow->queueBuffer(nativeBuffer, fenceFd);
 }
@@ -320,7 +330,7 @@ int BaseNativeWindow::_query(const struct ANativeWindow* window, int what, int* 
 			return NO_ERROR;
 		case NATIVE_WINDOW_BUFFER_AGE:
 			// sure :)
-			*value = 2;
+			*value =self->buffer_age;
 			return NO_ERROR;
 #endif
 	}

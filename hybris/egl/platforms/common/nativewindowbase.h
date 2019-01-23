@@ -16,6 +16,8 @@
 #define NO_ERROR                0L
 #define BAD_VALUE               -1
 
+class BaseNativeWindow;
+
 /**
  * @brief A Class to do common ANativeBuffer initialization and thunk c-style
  *        callbacks into C++ method calls.
@@ -32,7 +34,9 @@ public:
 	ANativeWindowBuffer* getNativeBuffer() const;
 
 private:
+        friend class BaseNativeWindow;
 	unsigned int refcount;
+        unsigned int frame_counter;
 	static void _decRef(struct android_native_base_t* base);
 	static void _incRef(struct android_native_base_t* base);
 };
@@ -56,6 +60,8 @@ protected:
 
 	// does this require more magic?
 	unsigned int refcount;
+        unsigned int frame_counter;
+        unsigned int buffer_age;
 	static void _decRef(struct android_native_base_t* base);
 	static void _incRef(struct android_native_base_t* base);
 
